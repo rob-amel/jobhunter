@@ -1,6 +1,7 @@
 streamlit
-requests
-beautifulsoup4
 pandas
-google-api-python-client
+pypdf
+google-generativeai
+xlsxwriter
+requests
 openpyxl
