@@ -2,6 +2,15 @@ import streamlit as st
 import pandas as pd
 import pypdf
 import google.generativeai as genai
+
+# Recupera la chiave dai secrets
+try:
+    api_key = st.secrets["GEMINI_KEY"]
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+except KeyError:
+    st.error("Chiave 'GEMINI_KEY' non trovata nei Secrets!")
+
 import urllib.parse
 import io
 import time
@@ -146,4 +155,5 @@ if st.button("🚀 Avvia Ricerca ed Estrazione AI", type="primary"):
                 )
                 
             except Exception as e:
+
                 st.error(f"Errore durante l'analisi AI: {e}")
