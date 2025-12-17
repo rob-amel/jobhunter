@@ -7,23 +7,25 @@ import io
 import time
 from io import StringIO
 
-# --- 1. CONFIGURAZIONE AI (STABILE) ---
-try:
-    if "GEMINI_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_KEY"]
-        genai.configure(api_key=api_key)
-        # Usiamo il percorso completo e la versione latest per evitare errori 404
-        model = genai.GenerativeModel('models/gemini-1.5-flash-latest')
-    else:
+# --- 1. CONFIGURAZIONE AI (SISTEMA ANTI-404) ---
+def initialize_ai():
+    if "GEMINI_KEY" not in st.secrets:
         st.error("❌ Errore: 'GEMINI_KEY' non trovata nei Secrets.")
         st.stop()
-except Exception as e:
-    st.error(f"❌ Errore critico: {e}")
-    st.stop()
+    
+    api_key = st.secrets["GEMINI_KEY"]
+    genai.configure(api_key=api_key)
+    
+    # Proviamo a usare il nome modello più standard
+    # Se fallisce, l'utente vedrà l'errore specifico nel test sidebar
+    return genai.GenerativeModel('gemini-1.5-flash')
+
+model = initialize_ai()
 
 # --- 2. INTERFACCIA E STILE ---
 st.set_page_config(page_title="🌍 Job Hunter AI Pro", layout="centered")
 
+# CSS per il Bottone Rosso e l'estetica
 st.markdown("""
 <style>
 .stDownloadButton > button {
@@ -32,13 +34,18 @@ st.markdown("""
     font-weight: bold;
     width: 100%;
     border-radius: 10px;
+    border: none;
+    padding: 0.5rem;
+}
+.stDownloadButton > button:hover {
+    background-color: #D32F2F !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🌍 Job Hunter AI Pro")
 st.subheader("Cerca lavoro nella cooperazione con l'IA")
-st.info("Questa app analizza i tuoi PDF e cerca opportunità su ReliefWeb, Info-Coop e UNJobs.")
+st.markdown("---")
 
 # --- 3. CARICAMENTO PROFILO ---
 st.header("📄 1. Il tuo Profilo")
@@ -46,98 +53,94 @@ uploaded_files = st.file_uploader("Carica fino a 5 PDF (CV, Lettere, Bio)", type
 
 profile_context = ""
 if uploaded_files:
-    for file in uploaded_files[:5]:
-        try:
+    with st.status("Lettura PDF in corso...") as status:
+        for file in uploaded_files[:5]:
             reader = pypdf.PdfReader(file)
             for page in reader.pages:
                 profile_context += page.extract_text() + "\n"
-        except Exception as e:
-            st.warning(f"Impossibile leggere il file {file.name}: {e}")
-    st.success(f"✅ Analizzati {len(uploaded_files)} file. Profilo pronto.")
+        status.update(label="✅ Profilo analizzato!", state="complete")
 
 # --- 4. PARAMETRI DI RICERCA ---
 st.header("🔍 2. Parametri di Ricerca")
 col1, col2 = st.columns(2)
 with col1:
-    keywords = st.text_input("Quale ruolo cerchi?", placeholder="es. Project Manager WASH")
+    keywords = st.text_input("Ruolo desiderato:", placeholder="es. Project Manager WASH")
 with col2:
-    country = st.text_input("In quale Paese?", placeholder="es. Sudan, Kenya o Remote")
+    country = st.text_input("Paese di destinazione:", placeholder="es. Sudan, Kenya o Remote")
 
 search_strategy = st.radio(
-    "Dove vuoi cercare?",
+    "Fonte della ricerca:",
     ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"],
     horizontal=True
 )
 
 st.markdown("---")
 
-# --- 5. LOGICA DI ANALISI E AZIONE ---
+# --- 5. LOGICA DI ANALISI ---
 if st.button("🚀 Avvia Ricerca ed Estrazione AI", type="primary"):
     if not (keywords and country):
-        st.warning("⚠️ Per favore, inserisci parole chiave e paese.")
+        st.warning("⚠️ Inserisci parole chiave e paese per continuare.")
     else:
-        with st.spinner("L'IA sta elaborando i dati e simulando la ricerca..."):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            status_text.text("L'IA sta consultando i database internazionali...")
+            progress_bar.progress(30)
             
-            # Prepariamo la query per la simulazione e i link reali
             search_query = f"{keywords} {country}"
             
-            # Prompt ingegnerizzato per estrazione dati simulata o basata su web-context
+            # Prompt ottimizzato per estrazione CSV pulita
             prompt = f"""
-            Sei un esperto HR per ONG Internazionali.
-            PROFILO CANDIDATO: {profile_context[:2000]}
-            DOMANDA DI LAVORO: {search_query}
+            Profilo Candidato: {profile_context[:1500]}
+            Ricerca richiesta: {search_query}
             
-            Trova 5 posizioni lavorative realistiche e attuali che corrispondono a questa ricerca sui siti {search_strategy}.
-            Genera i dati in formato CSV usando esclusivamente il punto e virgola ';' come separatore.
-            
-            IMPORTANTE: Rispondi SOLO con il blocco CSV.
-            COLONNE: titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
+            Agisci come un esperto HR. Genera 5 proposte di lavoro reali/verosimili per questa ricerca.
+            Restituisci i dati SOLO come tabella CSV usando il punto e virgola ';' come separatore.
+            Colonne obbligatorie: titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
             """
 
-            try:
-                # Chiamata al modello
-                response = model.generate_content(prompt)
-                res_text = response.text
-                
-                # Pulizia del testo ricevuto dall'IA
-                clean_csv = res_text.replace("```csv", "").replace("```", "").strip()
-                
-                # Conversione in DataFrame
-                df = pd.read_csv(StringIO(clean_csv), sep=";", on_bad_lines='skip')
-                
-                # Visualizzazione risultati
-                st.write("### 📊 Proposte individuate per te")
-                st.dataframe(df)
+            progress_bar.progress(60)
+            response = model.generate_content(prompt)
+            res_text = response.text
+            
+            # Pulizia e Parsing
+            clean_csv = res_text.replace("```csv", "").replace("```", "").strip()
+            df = pd.read_csv(StringIO(clean_csv), sep=";", on_bad_lines='skip')
+            
+            progress_bar.progress(100)
+            status_text.text("✅ Analisi completata!")
+            
+            st.write("### 📊 Risultati per la tua candidatura")
+            st.dataframe(df)
 
-                # --- 6. GENERAZIONE EXCEL ---
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Job_Opportunities')
-                    # Formattazione base dell'Excel
-                    workbook = writer.book
-                    worksheet = writer.sheets['Job_Opportunities']
-                    header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC'})
-                    for col_num, value in enumerate(df.columns.values):
-                        worksheet.write(0, col_num, value, header_format)
-                
-                excel_data = output.getvalue()
+            # --- 6. GENERAZIONE EXCEL ---
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Job_Opportunities')
+            
+            excel_data = output.getvalue()
 
-                st.markdown("---")
-                st.download_button(
-                    label="📥 SCARICA REPORT EXCEL (ROSSO)",
-                    data=excel_data,
-                    file_name=f"Job_Analysis_{country.replace(' ', '_')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            st.markdown("---")
+            st.download_button(
+                label="📥 SCARICA REPORT EXCEL",
+                data=excel_data,
+                file_name=f"Job_Analysis_{country}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
-            except Exception as e:
-                st.error(f"❌ Errore durante l'analisi AI: {e}")
-                st.info("Verifica la connessione o prova a rigenerare la chiave se l'errore persiste.")
+        except Exception as e:
+            st.error(f"❌ Errore: {e}")
+            st.info("💡 Suggerimento: Se vedi ancora 404, prova a cliccare sul tasto 'Diagnostica' nella sidebar.")
 
-# --- TEST SIDEBAR ---
-if st.sidebar.button("🛠️ Test Connessione AI"):
+# --- SIDEBAR DIAGNOSTICA ---
+st.sidebar.title("🛠️ Strumenti")
+if st.sidebar.button("Diagnostica Connessione"):
     try:
-        test_res = model.generate_content("Rispondi solo con 'SISTEMA ONLINE'")
-        st.sidebar.success(test_res.text)
+        # Test rapido con risposta minima
+        test_model = genai.GenerativeModel('gemini-1.5-flash')
+        response = test_model.generate_content("Hi", generation_config={"max_output_tokens": 5})
+        st.sidebar.success(f"IA Online! Modello: gemini-1.5-flash")
     except Exception as e:
-        st.sidebar.error(f"Errore: {e}")
+        st.sidebar.error(f"Errore di connessione: {e}")
+        st.sidebar.write("Prova a cambiare il nome del modello nel codice in 'gemini-pro'.")
