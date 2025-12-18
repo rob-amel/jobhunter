@@ -59,10 +59,49 @@ with col2:
 search_strategy = st.radio("Sorgente dati:", ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"], horizontal=True)
 
 # --- 5. FUNZIONE DI ANALISI (CORRETTA) ---
+import time # Importante per la pausa
+
 def cerca_lavoro_ai(profilo, query, strategia):
     if not GEMINI_API_KEY or GEMINI_API_KEY == "":
-        st.error("❌ Errore: API Key mancante. Inseriscila nei Secrets di Streamlit.")
+        st.error("❌ API Key mancante.")
         return None
+
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    prompt = f"""
+    Sei un esperto HR. Analizza il profilo e la ricerca lavoro.
+    PROFILO: {profilo[:2000]}
+    RICERCA: {query} su {strategia}
+    
+    Trova 5 opportunità e rispondi SOLO in formato CSV con ';' come separatore.
+    titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
+    """
+
+    # Tentativi automatici in caso di errore 429
+    for tentativo in range(3):
+        try:
+            # USIAMO IL MODELLO 1.5 FLASH (Più stabile per il piano free)
+            response = client.models.generate_content(
+                model='gemini-1.5-flash', 
+                contents=prompt
+            )
+            
+            text_out = response.text.strip()
+            if "```" in text_out:
+                text_out = text_out.split("```")[1].replace("csv", "").strip()
+            
+            return pd.read_csv(StringIO(text_out), sep=";", on_bad_lines='skip')
+
+        except Exception as e:
+            if "429" in str(e):
+                st.warning(f"Quota esaurita. Attendo 10 secondi (Tentativo {tentativo+1}/3)...")
+                time.sleep(10) # Aspetta 10 secondi prima di riprovare
+            else:
+                st.error(f"❌ Errore AI: {e}")
+                return None
+    
+    st.error("L'IA è troppo occupata al momento. Riprova tra un minuto.")
+    return None
 
     try:
         # Passiamo esplicitamente la chiave al Client (risolve l'errore 'Missing key inputs')
@@ -124,3 +163,4 @@ if st.button("🚀 AVVIA JOB HUNTER", type="primary"):
                 )
             else:
                 st.info("Nessun risultato generato. Riprova tra un momento.")
+
