@@ -1,24 +1,23 @@
 import streamlit as st
 import pandas as pd
 import pypdf
-import google.generativeai as genai
 import io
-from io import StringIO
+import os
+from io import BytesIO, StringIO
+from datetime import datetime
+from google import genai
+from google.genai import types
 
-# --- 1. CONFIGURAZIONE AI (Logica Lino Bandi 2) ---
-# Recuperiamo la chiave dai secrets e configuriamo in modo semplice
-if "GEMINI_KEY" in st.secrets:
-    genai.configure(api_key=st.secrets["GEMINI_KEY"])
-    # Usiamo il nome più generico possibile che Google reindirizza automaticamente
-    model = genai.GenerativeModel('gemini-1.5-flash')
-else:
-    st.error("Manca la chiave GEMINI_KEY nei Secrets!")
-    st.stop()
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="🌍 Job Hunter AI Pro", layout="centered")
 
-# --- 2. INTERFACCIA ---
-st.set_page_config(page_title="Job Hunter AI", layout="centered")
+# Recupero chiave come in Lino Bandi 2
+try:
+    GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+except Exception:
+    GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Stile per il bottone rosso
+# --- STILE BOTTONE ROSSO ---
 st.markdown("""
 <style>
 .stDownloadButton > button {
@@ -26,84 +25,88 @@ st.markdown("""
     color: white !important;
     font-weight: bold;
     width: 100%;
+    border-radius: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🌍 Job Hunter AI")
-st.write("Analisi professionale basata su ReliefWeb, Info-Coop e UNJobs.")
+st.title("🌍 Job Hunter AI Pro")
+st.markdown("Basato sulla tecnologia di **Lino Bandi 2** per una ricerca lavoro infallibile.")
 
-# --- 3. LETTURA PDF ---
-st.sidebar.header("Carica il tuo Profilo")
-uploaded_files = st.sidebar.file_uploader("Upload PDF (max 5)", type="pdf", accept_multiple_files=True)
+# --- SIDEBAR: PROFILO ---
+st.sidebar.header("📄 Il tuo Profilo")
+uploaded_files = st.sidebar.file_uploader("Carica fino a 5 PDF (CV/Bio)", type="pdf", accept_multiple_files=True)
 
-profile_text = ""
+profile_context = ""
 if uploaded_files:
     for file in uploaded_files[:5]:
-        pdf = pypdf.PdfReader(file)
-        for page in pdf.pages:
-            profile_text += page.extract_text() + "\n"
-    st.sidebar.success("Profilo analizzato correttamente.")
+        reader = pypdf.PdfReader(file)
+        for page in reader.pages:
+            profile_context += page.extract_text() + "\n"
+    st.sidebar.success("Profilo analizzato!")
 
-# --- 4. RICERCA ---
+# --- AREA DI RICERCA ---
 st.header("🔍 Parametri di Ricerca")
 col1, col2 = st.columns(2)
 with col1:
-    ruolo = st.text_input("Ruolo:", placeholder="es. Project Manager")
+    keywords = st.text_input("Quale ruolo cerchi?", placeholder="es. Project Manager WASH")
 with col2:
-    paese = st.text_input("Paese:", placeholder="es. Kenya")
+    country = st.text_input("In quale Paese?", placeholder="es. Sudan o Remote")
 
-search_type = st.radio("Sorgente:", ["Siti Specifici Cooperazione", "Web Generale"], horizontal=True)
+search_strategy = st.radio("Sorgente:", ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"], horizontal=True)
 
-if st.button("🚀 Avvia Job Hunter", type="primary"):
-    if not (ruolo and paese):
-        st.warning("Inserisci ruolo e paese.")
+# --- FUNZIONE DI ANALISI (LOGICA LINO BANDI 2) ---
+def cerca_lavoro_ai(profilo, query, strategia):
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        # Usiamo il modello Flash 2.0 (o 1.5 se preferisci) come nel tuo codice funzionante
+        model_id = 'gemini-2.0-flash' # Oppure 'gemini-1.5-flash'
+        
+        prompt = f"""
+        Sei un esperto HR internazionale. Analizza il profilo del candidato e la sua ricerca.
+        PROFILO: {profilo[:2000]}
+        RICERCA: {query} su {strategia}
+        
+        Genera 5 opportunità di lavoro. Rispondi SOLO in formato CSV usando il punto e virgola ';' come separatore.
+        Colonne: titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
+        """
+        
+        response = client.models.generate_content(
+            model=model_id,
+            contents=prompt
+        )
+        
+        text_out = response.text.strip()
+        # Pulizia markdown
+        if "```" in text_out:
+            text_out = text_out.split("```")[1].replace("csv", "").strip()
+        
+        return pd.read_csv(StringIO(text_out), sep=";", on_bad_lines='skip')
+    except Exception as e:
+        st.error(f"Errore AI: {e}")
+        return None
+
+# --- AZIONE ---
+if st.button("🚀 AVVIA JOB HUNTER", type="primary"):
+    if not (keywords and country):
+        st.warning("Inserisci i dati per la ricerca.")
     else:
-        with st.spinner("L'IA sta leggendo gli annunci e preparando l'Excel..."):
-            try:
-                # Prompt ottimizzato
-                prompt = f"""
-                Analizza queste informazioni per un candidato della cooperazione internazionale.
-                PROFILO: {profile_text[:1500]}
-                RICERCA: {ruolo} in {paese}
+        with st.spinner("L'IA sta scansionando il web per te..."):
+            df_risultati = cerca_lavoro_ai(profile_context, f"{keywords} {country}", search_strategy)
+            
+            if df_risultati is not None:
+                st.write("### 📊 Opportunità individuate")
+                st.dataframe(df_risultati)
                 
-                Trova 5 opportunità e restituisci SOLO una tabella CSV con separatore ';' (punto e virgola).
-                Colonne: titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
-                """
-                
-                response = model.generate_content(prompt)
-                testo_risposta = response.text.strip()
-                
-                # Pulizia blocchi di codice se presenti
-                if "```" in testo_risposta:
-                    testo_risposta = testo_risposta.split("```")[1].replace("csv", "").strip()
-                
-                # Creazione DataFrame
-                df = pd.read_csv(StringIO(testo_risposta), sep=";", on_bad_lines='skip')
-                
-                st.write("### Risultati trovati")
-                st.dataframe(df)
-
-                # Generazione Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df.to_excel(writer, index=False, sheet_name='JobSearch')
+                # Excel Download
+                output = BytesIO()
+                df_risultati.to_excel(output, index=False, engine='xlsxwriter')
                 
                 st.markdown("---")
                 st.download_button(
                     label="📥 SCARICA REPORT EXCEL (ROSSO)",
                     data=output.getvalue(),
-                    file_name=f"Job_Hunter_{paese}.xlsx",
+                    file_name=f"Job_Hunter_{country}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
-            except Exception as e:
-                st.error(f"Errore durante l'analisi: {e}")
-
-# --- TEST ---
-if st.sidebar.button("Test AI"):
-    try:
-        res = model.generate_content("Ciao")
-        st.sidebar.write("✅ AI Funzionante!")
-    except Exception as e:
-        st.sidebar.error(f"Errore: {e}")
