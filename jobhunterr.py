@@ -8,7 +8,7 @@ import google.generativeai as genai
 from jobspy import scrape_jobs
 
 # --- CONFIGURAZIONE ---
-st.set_page_config(page_title="Job Hunter Pro - Document Intelligence", layout="wide")
+st.set_page_config(page_title="Job Hunter Pro - Opportunità Pertinenti", layout="wide")
 
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
@@ -18,66 +18,46 @@ except:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# --- FUNZIONE AUTO-DISCOVERY MODELLO (Risolve il 404) ---
 def ottieni_modello_valido():
-    """Trova il miglior modello disponibile per evitare l'errore 404"""
     try:
-        modelli_disponibili = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        # Ordine di preferenza
-        preferiti = [
-            'models/gemini-1.5-flash', 
-            'models/gemini-1.5-pro', 
-            'models/gemini-pro',
-            'models/gemini-1.0-pro'
-        ]
-        for p in preferiti:
-            if p in modelli_disponibili:
-                return p
-        return modelli_disponibili[0] if modelli_disponibili else None
-    except Exception as e:
-        st.error(f"Impossibile elencare i modelli: {e}")
-        return None
+        modelli = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        for p in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']:
+            if p in modelli: return p
+        return modelli[0] if modelli else None
+    except: return None
 
-# --- FUNZIONE ANALISI INTEGRATA ---
-def analizza_e_matcha(testo_documenti, keywords, paese):
+def analizza_e_trova_offerte(testo_documenti, keywords, paese):
     model_name = ottieni_modello_valido()
-    
-    if not model_name:
-        st.error("Nessun modello Gemini trovato per questa API Key.")
-        return None
-
-    st.info(f"Modello in uso: `{model_name}`")
+    if not model_name: return None
 
     try:
         model = genai.GenerativeModel(
             model_name=model_name,
-            generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
+            generation_config={"temperature": 0.7, "response_mime_type": "application/json"} # Temp più alta per maggiore pertinenza
         )
 
         prompt = f"""
-        Analizza questi documenti: {testo_documenti[:8000]}
+        TASK:
+        1. Analizza i documenti del candidato: {testo_documenti[:8000]}
+        2. Determina la sua anzianità lavorativa effettiva (anni totali).
+        3. Trova 5-7 opportunità in "{paese}" che siano PERTINENTI a "{keywords}". 
         
-        1. Calcola gli anni di esperienza per OGNI ruolo e somma il totale pertinente per: "{keywords}".
-        2. Trova 5 offerte in "{paese}" adatte ESATTAMENTE a quel livello.
-        3. Escludi offerte Senior se il candidato non ha almeno 6-7 anni di esperienza specifica.
+        LOGICA DI PERTINENZA (NON ESATTA):
+        - Includi ruoli affini (es. se cerca "Project Manager", considera anche "Program Coordinator", "Operations Officer" o "Team Lead").
+        - Valuta il settore: se il CV è orientato al non-profit, cerca in ONG e Organizzazioni Internazionali.
+        - RISPETTA IL LIVELLO: Se il candidato ha 4 anni di esperienza, proponi ruoli "Intermediate" o "Junior-Mid", evitando "Senior/Director" da 10+ anni.
+        - Sii creativo: se non trovi offerte identiche, proponi ruoli dove le sue competenze trasversali sono un valore aggiunto.
 
         RESTITUISCI SOLO JSON:
         {{
-          "profilo_estratto": {{
-            "anni_totali": "numero",
-            "competenze_chiave": ["...", "..."],
-            "analisi_cronologica": "sintesi delle date e ruoli trovati"
-          }},
           "match_offerte": [
             {{
               "titolo": "...",
-              "azienda": "...",
-              "data_inizio": "...",
-              "anni_richiesti_offerta": "...",
-              "match_score": "...",
-              "motivazione_match": "spiega il match tra i suoi anni reali e l'offerta",
-              "requisiti_specifici": "...",
-              "link": "..."
+              "organizzazione": "...",
+              "perche_pertinente": "Spiega il nesso logico tra il CV e questa posizione anche se non è un match esatto",
+              "anni_richiesti": "...",
+              "competenze_chiave_richieste": "...",
+              "link_ricerca_diretta": "URL di ricerca specifica su LinkedIn/Google per questa posizione"
             }}
           ]
         }}
@@ -85,52 +65,57 @@ def analizza_e_matcha(testo_documenti, keywords, paese):
 
         response = model.generate_content(prompt)
         text = response.text.strip()
-        # Pulizia markdown se presente
         if text.startswith("```json"): text = text[7:-3]
-        if text.startswith("```"): text = text[3:-3]
-        
         return json.loads(text)
-    except Exception as e:
-        st.error(f"Errore durante l'analisi: {e}")
-        return None
+    except: return None
 
 # --- INTERFACCIA ---
-st.title("🌍 Job Hunter Pro: Document Intelligence")
+st.title("🌍 Job Hunter Pro")
+st.markdown("##### Ricerca intelligente di opportunità pertinenti basata sui tuoi documenti")
 
 with st.sidebar:
-    st.header("📂 Documentazione")
-    uploaded_files = st.file_uploader("Carica CV e Documenti (PDF)", type="pdf", accept_multiple_files=True)
+    st.header("📂 Caricamento")
+    uploaded_files = st.file_uploader("Carica CV e Certificati (PDF)", type="pdf", accept_multiple_files=True)
     profile_text = ""
     if uploaded_files:
         for f in uploaded_files:
             reader = PdfReader(f)
             for page in reader.pages:
                 profile_text += (page.extract_text() or "") + "\n"
-        st.success(f"Analizzati {len(uploaded_files)} documenti.")
 
 col1, col2 = st.columns(2)
-with col1: kw = st.text_input("Ruolo desiderato")
+with col1: kw = st.text_input("Ruolo/Settore desiderato")
 with col2: ps = st.text_input("Area Geografica")
 
-if st.button("🚀 ANALIZZA E TROVA MATCH", type="primary"):
+if st.button("🚀 TROVA OPPORTUNITÀ PERTINENTI", type="primary"):
     if not profile_text:
-        st.warning("Carica i file PDF.")
+        st.warning("Carica i tuoi documenti per iniziare.")
+    elif not (kw and ps):
+        st.warning("Inserisci cosa cerchi e dove.")
     else:
-        with st.spinner("L'IA sta verificando la tua cronologia lavorativa..."):
-            risultato = analizza_e_matcha(profile_text, kw, ps)
+        with st.spinner("L'IA sta scansionando il mercato per opportunità affini..."):
+            risultato = analizza_e_trova_offerte(profile_text, kw, ps)
             
-            if risultato:
-                st.subheader("👤 Analisi del Profilo")
-                prof = risultato['profilo_estratto']
-                c1, c2 = st.columns([1, 4])
-                c1.metric("Anni Esperienza", f"{prof['anni_totali']} yrs")
-                c2.write(f"**Esperienza Cronologica:** {prof['analisi_cronologica']}")
+            if risultato and 'match_offerte' in risultato:
+                st.subheader(f"🔍 Offerte individuate in {ps}")
                 
-                st.divider()
-
                 for item in risultato['match_offerte']:
-                    with st.expander(f"📌 {item['titolo']} - {item['azienda']}"):
-                        st.write(f"**Match:** {item['match_score']} | **Anni Richiesti:** {item['anni_richiesti_offerta']}")
-                        st.write(f"**Motivazione:** {item['motivazione_match']}")
-                        st.write(f"**Requisiti:** {item['requisiti_specifici']}")
-                        st.write(f"**Link:** {item['link']}")
+                    with st.container():
+                        st.markdown(f"### 📌 {item['titolo']}")
+                        st.markdown(f"**🏢 Organizzazione:** {item['organizzazione']} | **⏳ Exp. Richiesta:** {item['anni_richiesti']}")
+                        
+                        # Box evidenziato per la pertinenza
+                        st.info(f"**💡 Logica di Pertinenza:** {item['perche_pertinente']}")
+                        
+                        st.write(f"**🛠 Competenze chiave:** {item['competenze_chiave_richieste']}")
+                        st.markdown(f"[🔗 Vai all'offerta o cerca su LinkedIn]({item['link_ricerca_diretta']})")
+                        st.divider()
+
+                # Excel Export
+                df_export = pd.DataFrame(risultato['match_offerte'])
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                    df_export.to_excel(writer, index=False)
+                st.download_button("📥 Scarica Report Excel", buffer.getvalue(), "lavori_pertinenti.xlsx")
+            else:
+                st.error("Nessun risultato trovato. Prova ad ampliare l'area geografica o il ruolo.")
