@@ -1,118 +1,104 @@
 import streamlit as st
 import pandas as pd
-import pypdf
+from pypdf import PdfReader
 import io
 import os
-import time
-from io import BytesIO, StringIO
+from datetime import datetime
 from google import genai
+from google.genai import types
 
-# --- 1. RECUPERO CHIAVE API ---
+# --- CONFIGURAZIONE CHIAVE ---
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
-except Exception:
+except:
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- 2. CONFIGURAZIONE INTERFACCIA ---
-st.set_page_config(page_title="🌍 Job Hunter AI Pro", layout="centered")
+# --- SCHEMA DI OUTPUT (Copiato dalla logica Lino Bandi 2) ---
+output_schema = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "jobs": types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(
+                type=types.Type.OBJECT,
+                properties={
+                    "titolo lavoro": types.Schema(type=types.Type.STRING),
+                    "organizzazione proponente": types.Schema(type=types.Type.STRING),
+                    "luogo": types.Schema(type=types.Type.STRING),
+                    "data di inizio": types.Schema(type=types.Type.STRING),
+                    "deadline": types.Schema(type=types.Type.STRING),
+                    "contenuto proposta": types.Schema(type=types.Type.STRING),
+                    "requisiti": types.Schema(type=types.Type.STRING),
+                    "link": types.Schema(type=types.Type.STRING),
+                }
+            )
+        )
+    }
+)
 
-st.markdown("""
-<style>
-.stDownloadButton > button {
-    background-color: #FF4B4B !important;
-    color: white !important;
-    font-weight: bold;
-    width: 100%;
-    border-radius: 10px;
-}
-</style>
-""", unsafe_allow_html=True)
+# --- FUNZIONE DI ESTRAZIONE (Logica Identica a Lino Bandi 2) ---
+def cerca_lavoro_ai(profilo, keywords, paese, strategia):
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        prompt = f"""
+        Sei un esperto HR. Analizza il profilo: {profilo[:2000]}
+        Trova 5 opportunità per: {keywords} in {paese} (Sorgente: {strategia}).
+        Usa i siti: ReliefWeb, Info-Cooperazione, UNJobs.
+        Compila tutti i campi richiesti in italiano. Se mancano info usa 'NA'.
+        """
 
-st.title("🌍 Job Hunter AI Pro")
-
-# --- 3. SIDEBAR: CARICAMENTO PROFILO ---
-st.sidebar.header("📄 Il tuo Profilo")
-uploaded_files = st.sidebar.file_uploader("Carica fino a 5 PDF", type="pdf", accept_multiple_files=True)
-
-profile_context = ""
-if uploaded_files:
-    for file in uploaded_files[:5]:
-        reader = pypdf.PdfReader(file)
-        for page in reader.pages:
-            text = page.extract_text()
-            if text: profile_context += text + "\n"
-    st.sidebar.success(f"✅ Profilo pronto!")
-
-# --- 4. PARAMETRI DI RICERCA ---
-col1, col2 = st.columns(2)
-with col1:
-    keywords = st.text_input("Ruolo:", placeholder="es. Project Manager")
-with col2:
-    country = st.text_input("Paese:", placeholder="es. Sudan")
-
-search_strategy = st.radio("Sorgente:", ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"], horizontal=True)
-
-# --- 5. FUNZIONE DI ANALISI (VERSIONE STABILE V1) ---
-def cerca_lavoro_ai(profilo, query, strategia):
-    if not GEMINI_API_KEY:
-        st.error("❌ Manca la API Key nei Secrets.")
+        response = client.models.generate_content(
+            model='gemini-2.0-flash', # Il modello che ti funziona in Lino Bandi 2
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=output_schema,
+            ),
+        )
+        return response.parsed # Restituisce direttamente l'oggetto strutturato
+    except Exception as e:
+        st.error(f"Errore durante l'analisi: {e}")
         return None
 
-    # Inizializziamo il client
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
-    prompt = f"""
-    Sei un esperto HR internazionale. Trova 5 opportunità di lavoro per questa ricerca:
-    PROFILO: {profilo[:1500]}
-    RICERCA: {query} su {strategia}
-    
-    Rispondi SOLO in formato CSV usando il punto e virgola ';' come separatore.
-    titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
-    """
+# --- INTERFACCIA ---
+st.set_page_config(page_title="🌍 Job Hunter Pro", layout="centered")
+st.title("🌍 Job Hunter Pro")
 
-    for tentativo in range(3):
-        try:
-            # FORZIAMO IL MODELLO SENZA PREFISSI E USANDO LA VERSIONE STABILE
-            response = client.models.generate_content(
-                model='gemini-1.5-flash', 
-                contents=prompt
-            )
-            
-            text_out = response.text.strip()
-            if "```" in text_out:
-                text_out = text_out.split("```")[1].replace("csv", "").strip()
-            
-            return pd.read_csv(StringIO(text_out), sep=";", on_bad_lines='skip')
+# Caricamento PDF
+st.sidebar.header("📄 Tuo Profilo")
+uploaded_files = st.sidebar.file_uploader("Carica CV (max 5)", type="pdf", accept_multiple_files=True)
 
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg:
-                st.warning("Quota esaurita, attendo 15 secondi...")
-                time.sleep(15)
-            elif "404" in err_msg:
-                # Se fallisce con 1.5-flash, proviamo l'ultimo tentativo con gemini-pro
-                st.warning("Modello flash non trovato, provo gemini-pro...")
-                try:
-                    response = client.models.generate_content(model='gemini-pro', contents=prompt)
-                    # ... logica di parsing identica ...
-                    return pd.read_csv(StringIO(response.text.strip().replace("```csv", "").replace("```", "").strip()), sep=";")
-                except:
-                    st.error("Errore di compatibilità modelli Google.")
-                    break
-            else:
-                st.error(f"❌ Errore: {e}")
-                break
-    return None
+profile_text = ""
+if uploaded_files:
+    for f in uploaded_files[:5]:
+        reader = PdfReader(f)
+        for page in reader.pages:
+            profile_text += page.extract_text() + "\n"
+    st.sidebar.success("Profilo pronto!")
 
-# --- 6. ESECUZIONE ---
-if st.button("🚀 AVVIA JOB HUNTER", type="primary"):
-    if not (keywords and country):
-        st.warning("Compila i campi ruolo e paese.")
+# Input
+col1, col2 = st.columns(2)
+with col1:
+    kw = st.text_input("Ruolo:")
+with col2:
+    ps = st.text_input("Paese:")
+strat = st.radio("Sito:", ["Specifici", "Tutto il Web"], horizontal=True)
+
+if st.button("🚀 AVVIA RICERCA", type="primary"):
+    if not (kw and ps):
+        st.warning("Inserisci i dati.")
     else:
-        with st.spinner("L'IA sta lavorando..."):
-            df = cerca_lavoro_ai(profile_context, f"{keywords} {country}", search_strategy)
-            if df is not None:
-                st.dataframe(df, use_container_width=True)
-                excel_buffer = BytesIO()
-                df.to_excel(excel_buffer, index=False, engine='xlsxwriter')
-                st.download_button("📥 SCARICA EXCEL (ROSSO)", excel_buffer.getvalue(), f"Jobs_{country}.xlsx")
+        with st.spinner("L'IA sta lavorando con la logica 'Lino Bandi'..."):
+            risultato = cerca_lavoro_ai(profile_text, kw, ps, strat)
+            
+            if risultato and hasattr(risultato, 'jobs'):
+                df = pd.DataFrame(risultato.jobs)
+                st.dataframe(df)
+
+                # Bottone Rosso Excel
+                st.markdown("<style>.stDownloadButton>button{background-color:#FF4B4B;color:white;font-weight:bold;width:100%}</style>", unsafe_allow_html=True)
+                
+                output = io.BytesIO()
+                df.to_excel(output, index=False, engine='xlsxwriter')
+                st.download_button("📥 SCARICA EXCEL", output.getvalue(), f"Jobs_{ps}.xlsx")
