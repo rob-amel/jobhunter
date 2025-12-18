@@ -3,21 +3,19 @@ import pandas as pd
 import pypdf
 import io
 import os
+import time
 from io import BytesIO, StringIO
 from google import genai
 
-# --- 1. RECUPERO CHIAVE API (METODO LINO BANDI 2) ---
+# --- 1. RECUPERO CHIAVE API ---
 try:
-    # Cerchiamo nei Secrets di Streamlit
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except Exception:
-    # Se non presente (test locale), cerchiamo nelle variabili d'ambiente
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 # --- 2. CONFIGURAZIONE INTERFACCIA ---
 st.set_page_config(page_title="🌍 Job Hunter AI Pro", layout="centered")
 
-# Stile per il bottone rosso richiesto
 st.markdown("""
 <style>
 .stDownloadButton > button {
@@ -26,17 +24,15 @@ st.markdown("""
     font-weight: bold;
     width: 100%;
     border-radius: 10px;
-    height: 3em;
 }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🌍 Job Hunter AI Pro")
-st.markdown("Analizza il tuo profilo e trova lavoro nei siti della cooperazione.")
 
 # --- 3. SIDEBAR: CARICAMENTO PROFILO ---
 st.sidebar.header("📄 Il tuo Profilo")
-uploaded_files = st.sidebar.file_uploader("Carica fino a 5 PDF (CV/Bio)", type="pdf", accept_multiple_files=True)
+uploaded_files = st.sidebar.file_uploader("Carica fino a 5 PDF", type="pdf", accept_multiple_files=True)
 
 profile_context = ""
 if uploaded_files:
@@ -44,43 +40,39 @@ if uploaded_files:
         reader = pypdf.PdfReader(file)
         for page in reader.pages:
             text = page.extract_text()
-            if text:
-                profile_context += text + "\n"
-    st.sidebar.success(f"✅ {len(uploaded_files)} file analizzati!")
+            if text: profile_context += text + "\n"
+    st.sidebar.success(f"✅ Profilo pronto!")
 
 # --- 4. PARAMETRI DI RICERCA ---
-st.header("🔍 Parametri di Ricerca")
 col1, col2 = st.columns(2)
 with col1:
-    keywords = st.text_input("Ruolo:", placeholder="es. Project Manager WASH")
+    keywords = st.text_input("Ruolo:", placeholder="es. Project Manager")
 with col2:
-    country = st.text_input("Paese:", placeholder="es. Sudan o Remote")
+    country = st.text_input("Paese:", placeholder="es. Sudan")
 
-search_strategy = st.radio("Sorgente dati:", ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"], horizontal=True)
+search_strategy = st.radio("Sorgente:", ["Siti Specifici (ReliefWeb, Info-Coop, UNJobs)", "Tutto il Web"], horizontal=True)
 
-# --- 5. FUNZIONE DI ANALISI (CORRETTA) ---
-import time # Importante per la pausa
-
+# --- 5. FUNZIONE DI ANALISI (VERSIONE STABILE V1) ---
 def cerca_lavoro_ai(profilo, query, strategia):
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "":
-        st.error("❌ API Key mancante.")
+    if not GEMINI_API_KEY:
+        st.error("❌ Manca la API Key nei Secrets.")
         return None
 
+    # Inizializziamo il client
     client = genai.Client(api_key=GEMINI_API_KEY)
     
     prompt = f"""
-    Sei un esperto HR. Analizza il profilo e la ricerca lavoro.
-    PROFILO: {profilo[:2000]}
+    Sei un esperto HR internazionale. Trova 5 opportunità di lavoro per questa ricerca:
+    PROFILO: {profilo[:1500]}
     RICERCA: {query} su {strategia}
     
-    Trova 5 opportunità e rispondi SOLO in formato CSV con ';' come separatore.
+    Rispondi SOLO in formato CSV usando il punto e virgola ';' come separatore.
     titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
     """
 
-    # Tentativi automatici in caso di errore 429
     for tentativo in range(3):
         try:
-            # USIAMO IL MODELLO 1.5 FLASH (Più stabile per il piano free)
+            # FORZIAMO IL MODELLO SENZA PREFISSI E USANDO LA VERSIONE STABILE
             response = client.models.generate_content(
                 model='gemini-1.5-flash', 
                 contents=prompt
@@ -93,74 +85,34 @@ def cerca_lavoro_ai(profilo, query, strategia):
             return pd.read_csv(StringIO(text_out), sep=";", on_bad_lines='skip')
 
         except Exception as e:
-            if "429" in str(e):
-                st.warning(f"Quota esaurita. Attendo 10 secondi (Tentativo {tentativo+1}/3)...")
-                time.sleep(10) # Aspetta 10 secondi prima di riprovare
+            err_msg = str(e)
+            if "429" in err_msg:
+                st.warning("Quota esaurita, attendo 15 secondi...")
+                time.sleep(15)
+            elif "404" in err_msg:
+                # Se fallisce con 1.5-flash, proviamo l'ultimo tentativo con gemini-pro
+                st.warning("Modello flash non trovato, provo gemini-pro...")
+                try:
+                    response = client.models.generate_content(model='gemini-pro', contents=prompt)
+                    # ... logica di parsing identica ...
+                    return pd.read_csv(StringIO(response.text.strip().replace("```csv", "").replace("```", "").strip()), sep=";")
+                except:
+                    st.error("Errore di compatibilità modelli Google.")
+                    break
             else:
-                st.error(f"❌ Errore AI: {e}")
-                return None
-    
-    st.error("L'IA è troppo occupata al momento. Riprova tra un minuto.")
+                st.error(f"❌ Errore: {e}")
+                break
     return None
-
-    try:
-        # Passiamo esplicitamente la chiave al Client (risolve l'errore 'Missing key inputs')
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        prompt = f"""
-        Sei un esperto HR internazionale. Analizza il profilo del candidato e la sua ricerca.
-        PROFILO CANDIDATO: {profilo[:2500]}
-        RICERCA: {query} su {strategia}
-        
-        Trova 5 opportunità di lavoro reali o verosimili. 
-        Rispondi SOLO in formato CSV usando il punto e virgola ';' come separatore.
-        Colonne: titolo lavoro; organizzazione proponente; luogo; data di inizio; deadline; contenuto proposta; requisiti; link
-        """
-        
-        # Chiamata al modello 2.0 Flash (veloce e gratuito)
-        response = client.models.generate_content(
-            model='gemini-2.0-flash',
-            contents=prompt
-        )
-        
-        text_out = response.text.strip()
-        
-        # Pulizia blocchi di codice markdown
-        if "```" in text_out:
-            text_out = text_out.split("```")[1].replace("csv", "").strip()
-        
-        # Trasformazione in DataFrame
-        df = pd.read_csv(StringIO(text_out), sep=";", on_bad_lines='skip')
-        return df
-
-    except Exception as e:
-        st.error(f"❌ Errore durante la chiamata AI: {e}")
-        return None
 
 # --- 6. ESECUZIONE ---
 if st.button("🚀 AVVIA JOB HUNTER", type="primary"):
     if not (keywords and country):
-        st.warning("⚠️ Inserisci ruolo e paese per iniziare.")
+        st.warning("Compila i campi ruolo e paese.")
     else:
-        with st.spinner("L'IA sta elaborando i dati..."):
-            df_risultati = cerca_lavoro_ai(profile_context, f"{keywords} {country}", search_strategy)
-            
-            if df_risultati is not None and not df_risultati.empty:
-                st.write("### 📊 Risultati per la tua ricerca")
-                st.dataframe(df_risultati, use_container_width=True)
-                
-                # Creazione Excel
+        with st.spinner("L'IA sta lavorando..."):
+            df = cerca_lavoro_ai(profile_context, f"{keywords} {country}", search_strategy)
+            if df is not None:
+                st.dataframe(df, use_container_width=True)
                 excel_buffer = BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                    df_risultati.to_excel(writer, index=False, sheet_name='JobSearch')
-                
-                st.markdown("---")
-                st.download_button(
-                    label="📥 SCARICA REPORT EXCEL (ROSSO)",
-                    data=excel_buffer.getvalue(),
-                    file_name=f"Job_Opportunities_{country}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-            else:
-                st.info("Nessun risultato generato. Riprova tra un momento.")
-
+                df.to_excel(excel_buffer, index=False, engine='xlsxwriter')
+                st.download_button("📥 SCARICA EXCEL (ROSSO)", excel_buffer.getvalue(), f"Jobs_{country}.xlsx")
