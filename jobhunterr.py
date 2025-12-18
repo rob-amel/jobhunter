@@ -6,7 +6,6 @@ import os
 import json
 import google.generativeai as genai
 from jobspy import scrape_jobs
-from datetime import datetime
 
 # --- CONFIGURAZIONE ---
 st.set_page_config(page_title="Job Hunter Pro - Document Intelligence", layout="wide")
@@ -19,46 +18,55 @@ except:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# --- FUNZIONE SCRAPING ---
-def ricerca_reale_web(ruolo, paese):
+# --- FUNZIONE AUTO-DISCOVERY MODELLO (Risolve il 404) ---
+def ottieni_modello_valido():
+    """Trova il miglior modello disponibile per evitare l'errore 404"""
     try:
-        jobs = scrape_jobs(
-            site_name=["linkedin", "indeed", "glassdoor"],
-            search_term=ruolo,
-            location=paese,
-            results_wanted=10,
-            country_specific=paese.lower() if len(paese) == 2 else None,
-        )
-        return jobs
+        modelli_disponibili = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        # Ordine di preferenza
+        preferiti = [
+            'models/gemini-1.5-flash', 
+            'models/gemini-1.5-pro', 
+            'models/gemini-pro',
+            'models/gemini-1.0-pro'
+        ]
+        for p in preferiti:
+            if p in modelli_disponibili:
+                return p
+        return modelli_disponibili[0] if modelli_disponibili else None
     except Exception as e:
-        return pd.DataFrame()
+        st.error(f"Impossibile elencare i modelli: {e}")
+        return None
 
 # --- FUNZIONE ANALISI INTEGRATA ---
 def analizza_e_matcha(testo_documenti, keywords, paese):
+    model_name = ottieni_modello_valido()
+    
+    if not model_name:
+        st.error("Nessun modello Gemini trovato per questa API Key.")
+        return None
+
+    st.info(f"Modello in uso: `{model_name}`")
+
     try:
         model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
+            model_name=model_name,
             generation_config={"temperature": 0.1, "response_mime_type": "application/json"}
         )
 
-        # Il prompt ora chiede prima un'analisi interna dei documenti e poi il match
         prompt = f"""
-        TASK:
-        1. Analizza i seguenti documenti (CV, Certificazioni, Lettere): {testo_documenti[:8000]}
-        2. Costruisci un profilo professionale calcolando con precisione gli anni di esperienza per OGNI ruolo ricoperto.
-        3. Somma l'esperienza totale pertinente per la posizione: "{keywords}".
-        4. Trova 5 offerte in "{paese}" che corrispondano ESATTAMENTE a questo livello di anzianità.
+        Analizza questi documenti: {testo_documenti[:8000]}
         
-        REGOLE DI FILTRO:
-        - Se il candidato ha 4 anni di esperienza totale, escludi tassativamente offerte "Senior" da 7-10 anni.
-        - Se un'offerta richiede competenze tecniche non presenti nei documenti, segnalalo come 'GAP'.
+        1. Calcola gli anni di esperienza per OGNI ruolo e somma il totale pertinente per: "{keywords}".
+        2. Trova 5 offerte in "{paese}" adatte ESATTAMENTE a quel livello.
+        3. Escludi offerte Senior se il candidato non ha almeno 6-7 anni di esperienza specifica.
 
-        RESTITUISCI UN JSON:
+        RESTITUISCI SOLO JSON:
         {{
           "profilo_estratto": {{
             "anni_totali": "numero",
             "competenze_chiave": ["...", "..."],
-            "analisi_cronologica": "breve sintesi dei ruoli trovati"
+            "analisi_cronologica": "sintesi delle date e ruoli trovati"
           }},
           "match_offerte": [
             {{
@@ -66,8 +74,8 @@ def analizza_e_matcha(testo_documenti, keywords, paese):
               "azienda": "...",
               "data_inizio": "...",
               "anni_richiesti_offerta": "...",
-              "match_score": "percentuale",
-              "motivazione_match": "spiega il confronto tra i suoi anni e quelli dell'offerta",
+              "match_score": "...",
+              "motivazione_match": "spiega il match tra i suoi anni reali e l'offerta",
               "requisiti_specifici": "...",
               "link": "..."
             }}
@@ -77,10 +85,13 @@ def analizza_e_matcha(testo_documenti, keywords, paese):
 
         response = model.generate_content(prompt)
         text = response.text.strip()
+        # Pulizia markdown se presente
         if text.startswith("```json"): text = text[7:-3]
+        if text.startswith("```"): text = text[3:-3]
+        
         return json.loads(text)
     except Exception as e:
-        st.error(f"Errore Analisi: {e}")
+        st.error(f"Errore durante l'analisi: {e}")
         return None
 
 # --- INTERFACCIA ---
@@ -89,7 +100,6 @@ st.title("🌍 Job Hunter Pro: Document Intelligence")
 with st.sidebar:
     st.header("📂 Documentazione")
     uploaded_files = st.file_uploader("Carica CV e Documenti (PDF)", type="pdf", accept_multiple_files=True)
-    
     profile_text = ""
     if uploaded_files:
         for f in uploaded_files:
@@ -99,49 +109,28 @@ with st.sidebar:
         st.success(f"Analizzati {len(uploaded_files)} documenti.")
 
 col1, col2 = st.columns(2)
-with col1: kw = st.text_input("Ruolo desiderato", placeholder="es. Humanitarian Project Manager")
-with col2: ps = st.text_input("Area Geografica", placeholder="es. Dakar, Senegal")
+with col1: kw = st.text_input("Ruolo desiderato")
+with col2: ps = st.text_input("Area Geografica")
 
-if st.button("🚀 ANALIZZA DOCUMENTI E TROVA MATCH", type="primary"):
+if st.button("🚀 ANALIZZA E TROVA MATCH", type="primary"):
     if not profile_text:
-        st.warning("Carica almeno un documento per l'analisi.")
-    elif not (kw and ps):
-        st.warning("Inserisci Ruolo e Area Geografica.")
+        st.warning("Carica i file PDF.")
     else:
-        with st.spinner("L'IA sta leggendo i tuoi documenti e calcolando la tua esperienza..."):
-            
+        with st.spinner("L'IA sta verificando la tua cronologia lavorativa..."):
             risultato = analizza_e_matcha(profile_text, kw, ps)
             
             if risultato:
-                # --- Sezione Profilo Estratto ---
-                st.subheader("👤 Profilo Ricostruito dall'IA")
+                st.subheader("👤 Analisi del Profilo")
                 prof = risultato['profilo_estratto']
-                c1, c2, c3 = st.columns([1, 2, 2])
+                c1, c2 = st.columns([1, 4])
                 c1.metric("Anni Esperienza", f"{prof['anni_totali']} yrs")
-                c2.write(f"**Competenze individuate:** {', '.join(prof['competenze_chiave'])}")
-                c3.info(f"**Sintesi Carriera:** {prof['analisi_cronologica']}")
+                c2.write(f"**Esperienza Cronologica:** {prof['analisi_cronologica']}")
                 
                 st.divider()
 
-                # --- Sezione Match ---
-                st.subheader("🎯 Offerte Tailored individuate")
-                df_match = pd.DataFrame(risultato['match_offerte'])
-                
                 for item in risultato['match_offerte']:
-                    with st.expander(f"📌 {item['titolo']} @ {item['azienda']} (Match: {item['match_score']})"):
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            st.write(f"**⏳ Richiesti dall'azienda:** {item['anni_richiesti_offerta']}")
-                            st.write(f"**📅 Inizio:** {item['data_inizio']}")
-                            st.write(f"**🔗 Link:** {item['link']}")
-                        with col_b:
-                            st.write(f"**⚖️ Analisi Compatibilità:** {item['motivazione_match']}")
-                            st.write(f"**🛠 Requisiti:** {item['requisiti_specifici']}")
-
-                # Download Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_match.to_excel(writer, index=False)
-                st.download_button("📥 Scarica Report Excel", output.getvalue(), "match_lavoro_tailored.xlsx")
-            else:
-                st.error("Errore nell'elaborazione dei dati.")
+                    with st.expander(f"📌 {item['titolo']} - {item['azienda']}"):
+                        st.write(f"**Match:** {item['match_score']} | **Anni Richiesti:** {item['anni_richiesti_offerta']}")
+                        st.write(f"**Motivazione:** {item['motivazione_match']}")
+                        st.write(f"**Requisiti:** {item['requisiti_specifici']}")
+                        st.write(f"**Link:** {item['link']}")
