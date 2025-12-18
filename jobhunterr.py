@@ -8,10 +8,9 @@ import google.generativeai as genai
 from jobspy import scrape_jobs
 from datetime import datetime
 
-# --- CONFIGURAZIONE PAGINA ---
-st.set_page_config(page_title="Job Hunter Pro + Real Search", layout="wide")
+# --- CONFIGURAZIONE ---
+st.set_page_config(page_title="Job Hunter Pro - Tailored Edition", layout="wide")
 
-# --- RECUPERO API KEY ---
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
@@ -20,125 +19,129 @@ except:
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# --- FUNZIONE 1: RICERCA REALE (JOBSPY) ---
+# --- FUNZIONE SCRAPING (Resiliente) ---
 def ricerca_reale_web(ruolo, paese):
     try:
-        # Nota: JobSpy cerca su LinkedIn, Indeed, Glassdoor simultaneamente
+        # Nota: usiamo parametri generici per evitare errori di versione
         jobs = scrape_jobs(
             site_name=["linkedin", "indeed", "glassdoor"],
             search_term=ruolo,
             location=paese,
-            results_wanted=5,
-            hours_old=72, 
-            country_specific=paese.lower(),
+            results_wanted=7,
+            country_specific=paese.lower() if len(paese) == 2 else None,
         )
         return jobs
     except Exception as e:
-        st.error(f"Errore durante lo scraping reale: {e}")
+        st.error(f"Errore scraping: {e}")
         return pd.DataFrame()
 
-# --- FUNZIONE 2: ANALISI IA (GEMINI) ---
-def cerca_lavoro_ai(profilo, keywords, paese):
-    # Cerchiamo il modello disponibile come nel passaggio precedente
-    def get_model():
-        try:
-            available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            for m in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']:
-                if m in available: return m
-            return available[0] if available else "models/gemini-pro"
-        except: return "models/gemini-pro"
-
-    model_name = get_model()
-    
-    generation_config = {
-        "temperature": 0.3,
-        "response_mime_type": "application/json",
-    }
-
-    model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
-
-    prompt = f"""
-    Sei un recruiter esperto. Analizza questo CV: {profilo[:4000]}
-    
-    Trova 5 opportunità (anche simulate basate su aziende reali del settore) per "{keywords}" in "{paese}".
-    Per ogni posizione, sii molto preciso.
-    
-    Restituisci esclusivamente un ARRAY JSON con questo formato:
-    [
-      {{
-        "titolo_lavoro": "...",
-        "organizzazione": "...",
-        "luogo": "...",
-        "data_inizio_stimata": "...",
-        "anni_esperienza_richiesti": "...",
-        "requisiti_specifici": "...",
-        "link_fonte": "...",
-        "match_con_cv_percentuale": "..."
-      }}
-    ]
-    """
-
+# --- FUNZIONE ANALISI IA TAILORED ---
+def cerca_lavoro_ai(profilo, keywords, paese, anni_utente):
+    # Selezione dinamica del modello
     try:
+        model_name = "gemini-1.5-flash"
+        model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config={"temperature": 0.2, "response_mime_type": "application/json"}
+        )
+
+        prompt = f"""
+        Sei un Senior Recruiter. Il candidato ha esattamente {anni_utente} anni di esperienza professionale.
+        
+        Analizza attentamente questo CV: {profilo[:4000]}
+        
+        REGOLE MANDATORIE:
+        1. Trova 5 lavori per "{keywords}" in "{paese}".
+        2. NON proporre lavori che richiedono più di {anni_utente} anni di esperienza. Se il lavoro richiede "Senior" o "7+ anni", SCARTALO.
+        3. Se il CV non ha competenze specifiche richieste da un lavoro, segnalalo nel campo 'gap_analisi'.
+
+        Restituisci un ARRAY JSON con questa struttura esatta:
+        [
+          {{
+            "titolo_lavoro": "...",
+            "organizzazione": "...",
+            "luogo": "...",
+            "data_inizio": "...",
+            "anni_esperienza_richiesti": "...",
+            "requisiti_specifici": "...",
+            "perche_adatto": "Spiega brevemente il match con i {anni_utente} anni del candidato",
+            "gap_analisi": "Quali competenze mancano al candidato per questa posizione?",
+            "link": "..."
+          }}
+        ]
+        """
+
         response = model.generate_content(prompt)
         text = response.text.strip()
         if text.startswith("```json"): text = text[7:-3]
         return json.loads(text)
-    except:
+    except Exception as e:
+        st.error(f"Errore IA: {e}")
         return None
 
-# --- INTERFACCIA UTENTE ---
-st.title("🌍 Job Hunter Pro v2.0")
-st.markdown("### Ricerca Ibrida: Web Scraping Reale + Analisi IA")
+# --- INTERFACCIA ---
+st.title("🌍 Job Hunter Pro: Ricerca Su Misura")
 
 with st.sidebar:
-    st.header("📄 Il tuo Profilo")
-    uploaded_files = st.file_uploader("Carica CV (PDF)", type="pdf", accept_multiple_files=True)
+    st.header("📄 Analisi Profilo")
+    uploaded_files = st.file_uploader("Carica CV (PDF)", type="pdf")
+    
+    # Parametro critico: Anni di esperienza
+    anni_exp = st.number_input("I tuoi anni di esperienza effettivi:", min_value=0, max_value=40, value=4)
+    
     profile_text = ""
     if uploaded_files:
-        for f in uploaded_files:
-            reader = PdfReader(f)
-            for page in reader.pages:
-                profile_text += (page.extract_text() or "") + "\n"
-        st.success("CV analizzato correttamente.")
+        reader = PdfReader(uploaded_files)
+        for page in reader.pages:
+            profile_text += (page.extract_text() or "") + "\n"
+        st.success("CV Caricato!")
 
 col1, col2 = st.columns(2)
-with col1: kw = st.text_input("Che lavoro cerchi?", placeholder="es. Senior Data Analyst")
-with col2: ps = st.text_input("Dove?", placeholder="es. Italy o Switzerland")
+with col1: kw = st.text_input("Ruolo", placeholder="es. Project Manager")
+with col2: ps = st.text_input("Località", placeholder="es. Milano, Italy")
 
-if st.button("🚀 AVVIA RICERCA INTEGRATA", type="primary"):
+if st.button("🚀 AVVIA RICERCA TAILORED", type="primary"):
     if not (kw and ps):
-        st.warning("Inserisci ruolo e località.")
+        st.warning("Compila i campi Ruolo e Località.")
     else:
-        # --- PARTE 1: RICERCA REALE ---
-        with st.spinner("🕵️‍♂️ Scraping in corso su LinkedIn, Indeed e Glassdoor..."):
+        with st.spinner(f"Filtrando posizioni adatte per {anni_exp} anni di esperienza..."):
+            
+            # 1. Ricerca Live
             df_reale = ricerca_reale_web(kw, ps)
             
-        # --- PARTE 2: ANALISI IA ---
-        with st.spinner("🤖 L'intelligenza artificiale sta elaborando i dettagli..."):
-            dati_ai = cerca_lavoro_ai(profile_text, kw, ps)
+            # 2. Analisi IA con filtro anni
+            dati_ai = cerca_lavoro_ai(profile_text, kw, ps, anni_exp)
 
-        # --- VISUALIZZAZIONE RISULTATI ---
-        tab1, tab2 = st.tabs(["📊 Report Completo IA", "🌐 Risultati Web Diretti"])
-        
-        with tab1:
-            if dati_ai:
-                final_df = pd.DataFrame(dati_ai)
-                st.write("### 💎 Opportunità Selezionate per Te")
-                st.table(final_df) # Usiamo table per vedere bene i requisiti lunghi
-                
-                # Download Excel
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    final_df.to_excel(writer, index=False, sheet_name='Opportunità')
-                st.download_button("📥 Scarica Report Excel Completo", output.getvalue(), f"Jobs_{ps}_{datetime.now().strftime('%d%m')}.xlsx")
-            else:
-                st.error("L'IA non è riuscita a generare il report.")
+        # Visualizzazione
+        if dati_ai:
+            df_final = pd.DataFrame(dati_ai)
+            
+            st.subheader(f"🎯 Top 5 Match per il tuo profilo ({anni_exp} anni exp.)")
+            
+            # Formattazione per rendere i risultati leggibili
+            for i, row in df_final.iterrows():
+                with st.expander(f"📌 {row['titolo_lavoro']} - {row['organizzazione']}"):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write(f"**📍 Luogo:** {row['luogo']}")
+                        st.write(f"**⏳ Esperienza Richiesta:** {row['anni_esperienza_richiesti']}")
+                        st.write(f"**📅 Inizio:** {row['data_inizio']}")
+                    with c2:
+                        st.success(f"**✅ Perché è adatto:** {row['perche_adatto']}")
+                        if row['gap_analisi']:
+                            st.warning(f"**⚠️ Gap da colmare:** {row['gap_analisi']}")
+                    
+                    st.write(f"**🛠 Requisiti:** {row['requisiti_specifici']}")
+                    st.write(f"**🔗 Link:** {row['link']}")
 
-        with tab2:
-            if not df_reale.empty:
-                st.write("### 🔍 Ultimi annunci trovati live")
-                # Selezioniamo solo colonne interessanti per pulizia
-                cols = ['title', 'company', 'location', 'job_url']
-                st.dataframe(df_reale[cols] if all(c in df_reale.columns for c in cols) else df_reale)
-            else:
-                st.info("Nessun annuncio recente trovato via web scraping. Affidati al report IA.")
+            # Export Excel
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df_final.to_excel(writer, index=False)
+            st.download_button("📥 Scarica Report Excel", output.getvalue(), "lavori_su_misura.xlsx")
+        else:
+            st.error("Non è stato possibile generare risultati su misura.")
+
+        if not df_reale.empty:
+            with st.expander("🌐 Vedi altri annunci trovati sul Web (Non filtrati)"):
+                st.dataframe(df_reale[['title', 'company', 'location', 'job_url']])
