@@ -3,132 +3,142 @@ import pandas as pd
 from pypdf import PdfReader
 import io
 import os
-import time
 import json
 import google.generativeai as genai
+from jobspy import scrape_jobs
+from datetime import datetime
 
-# --- 1. CONFIGURAZIONE ---
-st.set_page_config(page_title="🌍 Job Hunter Pro", layout="centered")
-st.title("🌍 Job Hunter Pro")
+# --- CONFIGURAZIONE PAGINA ---
+st.set_page_config(page_title="Job Hunter Pro + Real Search", layout="wide")
 
-# Recupero API KEY
+# --- RECUPERO API KEY ---
 try:
     GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
 except:
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-if not GEMINI_API_KEY:
-    st.error("❌ Chiave API mancante! Inseriscila nei secrets.")
-    st.stop()
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-# --- 2. FUNZIONE PER TROVARE IL MODELLO GIUSTO ---
-def trova_modello_disponibile():
-    """Cerca un modello valido supportato dalla tua API Key"""
-    pref_list = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']
-    
+# --- FUNZIONE 1: RICERCA REALE (JOBSPY) ---
+def ricerca_reale_web(ruolo, paese):
     try:
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-        
-        # 1. Cerca il preferito (Flash)
-        for pref in pref_list:
-            if pref in available_models:
-                return pref
-        
-        # 2. Se non trova i preferiti, prendi il primo disponibile generico
-        if available_models:
-            return available_models[0]
-            
+        # Nota: JobSpy cerca su LinkedIn, Indeed, Glassdoor simultaneamente
+        jobs = scrape_jobs(
+            site_name=["linkedin", "indeed", "glassdoor"],
+            search_term=ruolo,
+            location=paese,
+            results_wanted=5,
+            hours_old=72, 
+            country_specific=paese.lower(),
+        )
+        return jobs
     except Exception as e:
-        st.error(f"Errore nel listare i modelli: {e}")
-        return "models/gemini-pro" # Fallback disperato
-    
-    return "models/gemini-pro"
+        st.error(f"Errore durante lo scraping reale: {e}")
+        return pd.DataFrame()
 
-# --- 3. FUNZIONE RICERCA ---
+# --- FUNZIONE 2: ANALISI IA (GEMINI) ---
 def cerca_lavoro_ai(profilo, keywords, paese):
-    
-    # Trova il modello dinamicamente
-    model_name = trova_modello_disponibile()
-    st.info(f"🤖 Utilizzo modello: `{model_name}`") # Feedback per l'utente
+    # Cerchiamo il modello disponibile come nel passaggio precedente
+    def get_model():
+        try:
+            available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            for m in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']:
+                if m in available: return m
+            return available[0] if available else "models/gemini-pro"
+        except: return "models/gemini-pro"
 
-    # Configurazione
+    model_name = get_model()
+    
     generation_config = {
-        "temperature": 0.5,
+        "temperature": 0.3,
         "response_mime_type": "application/json",
     }
 
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        generation_config=generation_config
-    )
+    model = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
 
     prompt = f"""
-    Sei un recruiter. 
-    Profilo: {profilo[:3000]}
-    Task: Trova 5 job roles per "{keywords}" in "{paese}".
+    Sei un recruiter esperto. Analizza questo CV: {profilo[:4000]}
     
-    Output richiesto: Un ARRAY JSON puro con questa struttura:
+    Trova 5 opportunità (anche simulate basate su aziende reali del settore) per "{keywords}" in "{paese}".
+    Per ogni posizione, sii molto preciso.
+    
+    Restituisci esclusivamente un ARRAY JSON con questo formato:
     [
       {{
         "titolo_lavoro": "...",
         "organizzazione": "...",
         "luogo": "...",
-        "deadline": "...",
-        "link": "...",
-        "riassunto": "..."
+        "data_inizio_stimata": "...",
+        "anni_esperienza_richiesti": "...",
+        "requisiti_specifici": "...",
+        "link_fonte": "...",
+        "match_con_cv_percentuale": "..."
       }}
     ]
     """
 
     try:
         response = model.generate_content(prompt)
-        # Pulizia del testo per essere sicuri che sia JSON
-        text_resp = response.text.strip()
-        if text_resp.startswith("```json"):
-            text_resp = text_resp.replace("```json", "").replace("```", "")
-        
-        return json.loads(text_resp)
-
-    except Exception as e:
-        st.error(f"Errore durante la generazione ({model_name}): {e}")
+        text = response.text.strip()
+        if text.startswith("```json"): text = text[7:-3]
+        return json.loads(text)
+    except:
         return None
 
-# --- 4. INTERFACCIA ---
-st.sidebar.header("Carica CV")
-uploaded_files = st.sidebar.file_uploader("PDF", type="pdf", accept_multiple_files=True)
-profile_text = ""
+# --- INTERFACCIA UTENTE ---
+st.title("🌍 Job Hunter Pro v2.0")
+st.markdown("### Ricerca Ibrida: Web Scraping Reale + Analisi IA")
 
-if uploaded_files:
-    for f in uploaded_files:
-        try:
+with st.sidebar:
+    st.header("📄 Il tuo Profilo")
+    uploaded_files = st.file_uploader("Carica CV (PDF)", type="pdf", accept_multiple_files=True)
+    profile_text = ""
+    if uploaded_files:
+        for f in uploaded_files:
             reader = PdfReader(f)
             for page in reader.pages:
                 profile_text += (page.extract_text() or "") + "\n"
-        except:
-            pass
-    st.sidebar.success(f"CV Caricato.")
+        st.success("CV analizzato correttamente.")
 
 col1, col2 = st.columns(2)
-with col1: kw = st.text_input("Ruolo", "Project Manager")
-with col2: ps = st.text_input("Paese", "Kenya")
+with col1: kw = st.text_input("Che lavoro cerchi?", placeholder="es. Senior Data Analyst")
+with col2: ps = st.text_input("Dove?", placeholder="es. Italy o Switzerland")
 
-if st.button("🚀 CERCA", type="primary"):
-    with st.spinner("Connessione all'IA..."):
-        p_text = profile_text if profile_text else "Nessun CV."
-        data = cerca_lavoro_ai(p_text, kw, ps)
-        
-        if data:
-            df = pd.DataFrame(data)
-            st.dataframe(df, use_container_width=True)
+if st.button("🚀 AVVIA RICERCA INTEGRATA", type="primary"):
+    if not (kw and ps):
+        st.warning("Inserisci ruolo e località.")
+    else:
+        # --- PARTE 1: RICERCA REALE ---
+        with st.spinner("🕵️‍♂️ Scraping in corso su LinkedIn, Indeed e Glassdoor..."):
+            df_reale = ricerca_reale_web(kw, ps)
             
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                df.to_excel(writer, index=False)
-            st.download_button("Scarica Excel", buffer.getvalue(), "jobs.xlsx")
-        else:
-            st.warning("Nessun risultato trovato.")
+        # --- PARTE 2: ANALISI IA ---
+        with st.spinner("🤖 L'intelligenza artificiale sta elaborando i dettagli..."):
+            dati_ai = cerca_lavoro_ai(profile_text, kw, ps)
+
+        # --- VISUALIZZAZIONE RISULTATI ---
+        tab1, tab2 = st.tabs(["📊 Report Completo IA", "🌐 Risultati Web Diretti"])
+        
+        with tab1:
+            if dati_ai:
+                final_df = pd.DataFrame(dati_ai)
+                st.write("### 💎 Opportunità Selezionate per Te")
+                st.table(final_df) # Usiamo table per vedere bene i requisiti lunghi
+                
+                # Download Excel
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    final_df.to_excel(writer, index=False, sheet_name='Opportunità')
+                st.download_button("📥 Scarica Report Excel Completo", output.getvalue(), f"Jobs_{ps}_{datetime.now().strftime('%d%m')}.xlsx")
+            else:
+                st.error("L'IA non è riuscita a generare il report.")
+
+        with tab2:
+            if not df_reale.empty:
+                st.write("### 🔍 Ultimi annunci trovati live")
+                # Selezioniamo solo colonne interessanti per pulizia
+                cols = ['title', 'company', 'location', 'job_url']
+                st.dataframe(df_reale[cols] if all(c in df_reale.columns for c in cols) else df_reale)
+            else:
+                st.info("Nessun annuncio recente trovato via web scraping. Affidati al report IA.")
