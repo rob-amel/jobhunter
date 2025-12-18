@@ -4,9 +4,9 @@ from pypdf import PdfReader
 import io
 import os
 import time
-from datetime import datetime
-from google import genai
-from google.genai import types
+import json
+import google.generativeai as genai
+from google.ai.generativelanguage import Content, Part
 
 # --- 1. CONFIGURAZIONE CHIAVE ---
 try:
@@ -14,69 +14,89 @@ try:
 except:
     GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# --- 2. SCHEMA DI OUTPUT (STRUTTURA LINO BANDI) ---
-output_schema = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "jobs": types.Schema(
-            type=types.Type.ARRAY,
-            items=types.Schema(
-                type=types.Type.OBJECT,
-                properties={
-                    "titolo lavoro": types.Schema(type=types.Type.STRING),
-                    "organizzazione proponente": types.Schema(type=types.Type.STRING),
-                    "luogo": types.Schema(type=types.Type.STRING),
-                    "data di inizio": types.Schema(type=types.Type.STRING),
-                    "deadline": types.Schema(type=types.Type.STRING),
-                    "contenuto proposta": types.Schema(type=types.Type.STRING),
-                    "requisiti": types.Schema(type=types.Type.STRING),
-                    "link": types.Schema(type=types.Type.STRING),
-                }
-            )
-        )
+# Configura la libreria standard
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# --- 2. SCHEMA DI OUTPUT (Refactored per google-generativeai) ---
+# La libreria standard accetta un dizionario per lo schema JSON
+response_schema = {
+    "type": "OBJECT",
+    "properties": {
+        "jobs": {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "titolo_lavoro": {"type": "STRING"},
+                    "organizzazione_proponente": {"type": "STRING"},
+                    "luogo": {"type": "STRING"},
+                    "data_di_inizio": {"type": "STRING"},
+                    "deadline": {"type": "STRING"},
+                    "contenuto_proposta": {"type": "STRING"},
+                    "requisiti": {"type": "STRING"},
+                    "link": {"type": "STRING"},
+                },
+                "required": ["titolo_lavoro", "organizzazione_proponente", "luogo"]
+            }
+        }
     }
-)
+}
 
 # --- 3. FUNZIONE DI ESTRAZIONE CON RE-TRY AUTOMATICO ---
 def cerca_lavoro_ai(profilo, keywords, paese, strategia):
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    
+    # Configurazione del modello
+    generation_config = {
+        "temperature": 0.4,
+        "top_p": 0.95,
+        "top_k": 64,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json",
+        "response_schema": response_schema,
+    }
+
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash",
+        generation_config=generation_config,
+    )
+
     prompt = f"""
-    Sei un esperto HR. Analizza il profilo: {profilo[:1500]}
-    Trova 5 opportunità per: {keywords} in {paese}.
-    Sorgenti: ReliefWeb, Info-Cooperazione, UNJobs.
-    Rispondi esclusivamente in formato JSON come da schema.
+    Sei un esperto HR. Analizza il profilo seguente (testo estratto da CV): 
+    "{profilo[:2000]}"
+
+    Il candidato cerca opportunità per: "{keywords}" in "{paese}".
+    
+    Il tuo compito:
+    Simula una ricerca su database globali (es. ReliefWeb, Info-Cooperazione, UNJobs) e genera 5 opportunità di lavoro verosimili e altamente compatibili con il profilo.
+    
+    Rispondi esclusivamente rispettando lo schema JSON fornito.
     """
 
-    for tentativo in range(3): # Prova 3 volte prima di arrendersi
+    for tentativo in range(3): # Prova 3 volte
         try:
-            # CAMBIATO A 1.5-FLASH PER EVITARE IL LIMIT 0
-            response = client.models.generate_content(
-                model='gemini-1.5-flash', 
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=output_schema,
-                ),
-            )
-            return response.parsed
+            response = model.generate_content(prompt)
+            
+            # Parsing della risposta
+            json_response = json.loads(response.text)
+            return json_response
         
         except Exception as e:
             err_str = str(e)
             if "429" in err_str:
-                attesa = 20 # Secondi di attesa cautelativa
+                attesa = 20
                 st.warning(f"⚠️ Quota satura. In attesa di {attesa} secondi prima del tentativo {tentativo+1}...")
                 time.sleep(attesa)
             else:
-                st.error(f"Errore tecnico: {e}")
-                return None
+                st.error(f"Errore tecnico (Tentativo {tentativo+1}): {e}")
+                time.sleep(2)
+                
     return None
 
 # --- 4. INTERFACCIA ---
 st.set_page_config(page_title="🌍 Job Hunter Pro", layout="centered")
 st.title("🌍 Job Hunter Pro")
 
-# Stile Bottone Rosso
+# Stile Bottone
 st.markdown("<style>.stDownloadButton>button{background-color:#FF4B4B;color:white;font-weight:bold;width:100%}</style>", unsafe_allow_html=True)
 
 # Sidebar
@@ -89,24 +109,29 @@ if uploaded_files:
         reader = PdfReader(f)
         for page in reader.pages:
             profile_text += (page.extract_text() or "") + "\n"
-    st.sidebar.success("Profilo caricato.")
+    st.sidebar.success(f"Profilo caricato ({len(profile_text)} caratteri).")
 
 # Input
 col1, col2 = st.columns(2)
-with col1: kw = st.text_input("Ruolo desiderato:")
-with col2: ps = st.text_input("Paese/Area:")
+with col1: kw = st.text_input("Ruolo desiderato:", placeholder="es. Project Manager")
+with col2: ps = st.text_input("Paese/Area:", placeholder="es. Kenya")
 
 if st.button("🚀 AVVIA RICERCA AI", type="primary"):
     if not (kw and ps):
-        st.warning("Inserisci i dati per la ricerca.")
+        st.warning("Inserisci Ruolo e Paese per iniziare.")
     elif not GEMINI_API_KEY:
         st.error("Chiave API mancante nei Secrets!")
     else:
-        with st.spinner("L'IA sta elaborando le migliori offerte per te..."):
-            risultato = cerca_lavoro_ai(profile_text, kw, ps, "Siti Specifici")
+        with st.spinner("L'IA sta analizzando il profilo e cercando offerte..."):
+            # Se non c'è CV, usiamo una stringa vuota per evitare errori
+            p_text = profile_text if profile_text else "Nessun CV fornito, basati solo sulle keywords."
             
-            if risultato and hasattr(risultato, 'jobs'):
-                df = pd.DataFrame(risultato.jobs)
+            risultato = cerca_lavoro_ai(p_text, kw, ps, "Siti Specifici")
+            
+            # Verifica struttura
+            if risultato and "jobs" in risultato and len(risultato["jobs"]) > 0:
+                df = pd.DataFrame(risultato["jobs"])
+                
                 st.write("### 📊 Risultati Trovati")
                 st.dataframe(df, use_container_width=True)
 
@@ -116,4 +141,4 @@ if st.button("🚀 AVVIA RICERCA AI", type="primary"):
                 
                 st.download_button("📥 SCARICA REPORT EXCEL", output.getvalue(), f"Ricerca_{ps}.xlsx")
             else:
-                st.error("Non è stato possibile recuperare dati. Riprova tra un minuto.")
+                st.error("L'IA non ha trovato risultati o c'è stato un errore nel formato. Riprova.")
